@@ -1,13 +1,48 @@
 name: Purge Cloudflare Cache
-on: push
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
+  purge:
     runs-on: ubuntu-latest
     steps:
+      # jakejarvis/cloudflare-purge-action@master foi arquivada e roda em runtime
+      # Node 12, que o GitHub nao suporta mais: o job falhava em todo push. A
+      # purga agora chama a API v4 direto, e sem credenciais configuradas o job
+      # avisa e nao pinta o push de vermelho (nada a purgar sem token).
+      - name: Check credentials
+        id: config
+        env:
+          ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+        run: |
+          if [ -z "$ZONE" ] || [ -z "$TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_ZONE/CLOUDFLARE_TOKEN ausentes — purge ignorado"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
-    - name: Purge Cloudflare Cache
-      uses: jakejarvis/cloudflare-purge-action@master
-      env:
-        CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
-        CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+      - name: Purge everything
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+        run: |
+          set -euo pipefail
+          response=$(mktemp)
+          status=$(curl -sS -o "$response" -w '%{http_code}' \
+            -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE}/purge_cache" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data '{"purge_everything":true}')
+          cat "$response"
+          if [ "$status" != "200" ]; then
+            echo "::error::Falha ao purgar o cache da Cloudflare (HTTP ${status})"
+            exit 1
+          fi
